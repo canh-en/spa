@@ -1,0 +1,125 @@
+name: "Build and publish mythical images"
+on:
+    push:
+        branches:
+            - 'main'
+        paths:
+            - source/**
+
+    pull_request:
+      types: [opened, synchronize]
+      paths:
+          - source/**
+jobs:
+    build_and_push_images:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+            id-token: write
+        env:
+            REGISTRY_LOCATION: grafana/intro-to-mltp
+
+        strategy:
+            fail-fast: false
+            matrix:
+                file_tag:
+                    - file: source/docker/Dockerfile
+                      tag_suffix: mythical-beasts-requester
+                      context: source
+                      service: mythical-beasts-requester
+                      setup-qemu: true
+                    - file: source/docker/Dockerfile
+                      tag_suffix: mythical-beasts-server
+                      context: source
+                      service: mythical-beasts-server
+                      setup-qemu: true
+                    - file: source/docker/Dockerfile
+                      tag_suffix: mythical-beasts-recorder
+                      context: source
+                      service: mythical-beasts-recorder
+                      setup-qemu: true
+                    - file: source/mythical-beasts-frontend/Dockerfile
+                      tag_suffix: mythical-beasts-frontend
+                      context: source/mythical-beasts-frontend
+                      service: mythical-beasts-frontend
+                      setup-qemu: true
+
+        steps:
+            - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: DetermineReference
+              id: get_reference
+              run: |
+                if [ -z "$GITHUB_HEAD_REF" ]; then
+                  echo "ref=$GITHUB_REF" >> "$GITHUB_OUTPUT"
+                else
+                  echo "ref=$GITHUB_HEAD_REF" >> "$GITHUB_OUTPUT"
+                fi
+
+            - name: Determine image_tag to use
+              id: image_tag
+              run: |
+                SHA=$(git rev-parse --short HEAD)
+                BRANCH=$(git rev-parse --abbrev-ref HEAD | tr '/' '__')
+                REF_TAG=${{ steps.get_reference.outputs.ref }}
+
+                echo "SHA: $SHA"
+                echo "Branch: $BRANCH"
+                echo "Ref tag: $REF_TAG"
+
+                if [[ $REF_TAG =~ refs\/(heads|tags)\/ ]]; then
+                    REF_TAG=$(echo $REF_TAG | cut -d "/" -f 3)
+                    echo "Shortened ref tag is $REF_TAG"
+                fi
+
+                REF_TAG=$(echo -n "$REF_TAG" | tr -c '[:alnum:]._' '-')
+                echo "version=$REF_TAG" >> "$GITHUB_OUTPUT"
+                echo "Using version tag $REF_TAG"
+
+                # Finally check to see if we're building on main; if we are, add a tag for latest.
+                if [ "$BRANCH" == "main" ]; then
+                    echo "latest_tag=${{env.REGISTRY_LOCATION}}:${{matrix.file_tag.tag_suffix}}-latest" >> "$GITHUB_OUTPUT"
+                fi
+
+            - name: Set up QEMU
+              if: ${{ matrix.file_tag.setup-qemu }}
+              uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392
+              with:
+                image: tonistiigi/binfmt:master
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
+              with:
+                  config-inline: |
+                    [worker.oci]
+                    max-parallelism = 2
+
+            - name: Retrieve credentials from Vault
+              uses: grafana/shared-workflows/actions/get-vault-secrets@get-vault-secrets/v1.2.1
+              with:
+                common_secrets: |
+                  DOCKERHUB_USERNAME=dockerhub:username
+                  DOCKERHUB_PASSWORD=dockerhub:password
+
+            - name: Login to Docker Hub
+              uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+              with:
+                username: ${{ env.DOCKERHUB_USERNAME }}
+                password: ${{ env.DOCKERHUB_PASSWORD }}
+
+            - name: Matrix Build and push Mythical images
+              uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1
+              with:
+                context: ${{ matrix.file_tag.context }}
+                file: ${{ matrix.file_tag.file }}
+                build-args: |
+                  SERVICE=${{ matrix.file_tag.service }}
+                platforms: linux/amd64,linux/arm64
+                outputs: type=registry,push=${{inputs.push_images}}
+                tags: |
+                  ${{ env.REGISTRY_LOCATION }}:${{ matrix.file_tag.tag_suffix }}-${{ steps.image_tag.outputs.version }}
+                  ${{ steps.image_tag.outputs.latest_tag }}
