@@ -1,0 +1,27 @@
+
+services:
+
+  model:
+    image: deeptra-serving:1.0
+    container_name: deeptra-api
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - /workspaces/spa/DeepTra_serv:/app   # 🔥 mount model vào
+
+    depends_on:
+      - influxdb
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
